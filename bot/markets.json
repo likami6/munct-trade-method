@@ -1,0 +1,14 @@
+{
+  "timeframes": ["15m", "1h", "4h"],
+  "markets": [
+    {"name": "XAUUSD",      "source": "twelvedata", "symbol": "XAU/USD",       "tp_pips": 100, "pip_size": 0.1},
+    {"name": "NAS100",      "source": "yahoo",      "symbol": "NQ=F",          "tp_pct": 1},
+    {"name": "BTCUSDT",     "source": "gate",       "symbol": "BTC_USDT",      "tp_pct": 1},
+    {"name": "1000PEPEUSDT","source": "gate",       "symbol": "PEPE_USDT",     "tp_pct": 1, "multiplier": 1000},
+    {"name": "ZECUSDT",     "source": "gate",       "symbol": "ZEC_USDT",      "tp_pct": 1},
+    {"name": "HYPEUSDT",    "source": "gate",       "symbol": "HYPE_USDT",     "tp_pct": 1},
+    {"name": "LITUSDT",     "source": "gate",       "symbol": "LIT_USDT",      "tp_pct": 1},
+    {"name": "PENGUUSDT",   "source": "gate",       "symbol": "PENGU_USDT",    "tp_pct": 1},
+    {"name": "FARTCOINUSDT","source": "gate",       "symbol": "FARTCOIN_USDT", "tp_pct": 1}
+  ]
+}

@@ -1,29 +1,30 @@
 """EMA 9/20 cross alerts to Telegram (free, no TradingView plan needed).
 
 Same signal as the Pine strategy: EMA 9 crosses above EMA 20 on a closed candle -> BUY,
-crosses below -> SELL. Prices come from Twelve Data (free API key), so they can differ
-by a few cents from your TradingView broker feed.
+crosses below -> SELL. Markets and timeframes are listed in bot/markets.json.
 
-Settings come from environment variables (GitHub secrets / variables):
-  TELEGRAM_BOT_TOKEN  (required) token from @BotFather
-  TELEGRAM_CHAT_ID    (required) your chat id
-  TWELVEDATA_API_KEY  (required) free key from twelvedata.com
-  SYMBOL              default XAU/USD
-  INTERVAL            default 15min  (1min 5min 15min 30min 45min 1h 2h 4h 1day)
-  FAST_LEN / SLOW_LEN default 9 / 20
-  TP_PIPS / PIP_SIZE  default 100 / 0.1  (0 pips = no TP in the message)
-  STATE_FILE          default bot/state.json
-Run with --test to just send a test message.
+Price sources (prices can differ slightly from your TradingView feed):
+  gate        Gate.io USDT perpetuals, no key needed (crypto)
+  mexc        MEXC USDT perpetuals, no key needed (crypto; used if Gate fails)
+  twelvedata  Twelve Data, free key in TWELVEDATA_API_KEY (XAU/USD)
+  yahoo       Yahoo Finance, no key (NQ=F Nasdaq 100 futures for NAS100)
+
+Environment: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TWELVEDATA_API_KEY,
+FAST_LEN / SLOW_LEN (default 9 / 20), STATE_FILE (default bot/state.json),
+MARKETS_FILE (default bot/markets.json). Run with --test to send a test message.
 """
 import json
+import math
 import os
 import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-INTERVAL_MIN = {"1min": 1, "5min": 5, "15min": 15, "30min": 30, "45min": 45,
-                "1h": 60, "2h": 120, "4h": 240, "1day": 1440}
+TF_MIN = {"15m": 15, "1h": 60, "4h": 240}
+TF_LABEL = {"15m": "15m", "1h": "1H", "4h": "4H"}
+WIB = timezone(timedelta(hours=7))
+UA = "Mozilla/5.0 (X11; Linux x86_64) ema-cross-bot"
 
 
 def env(name, default=None):
@@ -32,7 +33,7 @@ def env(name, default=None):
 
 
 def http_json(url, data=None):
-    req = urllib.request.Request(url, data=data, headers={"User-Agent": "ema-cross-bot"})
+    req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())
 
@@ -45,22 +46,81 @@ def send_telegram(text):
         raise RuntimeError(f"Telegram error: {res}")
 
 
-def fetch_closed_bars(symbol, interval, now):
-    """Closed candles, oldest first, as (open_time_utc, close)."""
-    q = urllib.parse.urlencode({"symbol": symbol, "interval": interval, "outputsize": 500,
-                                "timezone": "UTC", "apikey": env("TWELVEDATA_API_KEY")})
+def utc(ts):
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+
+
+# ---- price sources: each returns [(open_time_utc, close), ...] oldest first, may include the forming candle
+
+def src_gate(symbol, tf):
+    q = urllib.parse.urlencode({"contract": symbol, "interval": tf, "limit": 500})
+    rows = http_json(f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?{q}")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Gate error: {rows}")
+    return [(utc(r["t"]), float(r["c"])) for r in rows]
+
+
+def src_mexc(symbol, tf):
+    iv = {"15m": "Min15", "1h": "Min60", "4h": "Hour4"}[tf]
+    end = int(datetime.now(timezone.utc).timestamp())
+    q = urllib.parse.urlencode({"interval": iv, "start": end - 500 * TF_MIN[tf] * 60, "end": end})
+    res = http_json(f"https://contract.mexc.com/api/v1/contract/kline/{symbol}?{q}")
+    if not res.get("success"):
+        raise RuntimeError(f"MEXC error: {res}")
+    d = res["data"]
+    return [(utc(t), float(c)) for t, c in zip(d["time"], d["close"])]
+
+
+def src_twelvedata(symbol, tf):
+    iv = {"15m": "15min", "1h": "1h", "4h": "4h"}[tf]
+    q = urllib.parse.urlencode({"symbol": symbol, "interval": iv, "outputsize": 500,
+                                "timezone": "UTC", "apikey": env("TWELVEDATA_API_KEY", "")})
     res = http_json(f"https://api.twelvedata.com/time_series?{q}")
     if res.get("status") != "ok":
         raise RuntimeError(f"Twelve Data error: {res.get('message', res)}")
-    step = timedelta(minutes=INTERVAL_MIN[interval])
-    bars = []
+    out = []
     for v in reversed(res["values"]):
-        fmt = "%Y-%m-%d %H:%M:%S" if " " in v["datetime"] else "%Y-%m-%d"
-        t = datetime.strptime(v["datetime"], fmt).replace(tzinfo=timezone.utc)
-        if t + step <= now:  # drop the candle that is still forming
-            bars.append((t, float(v["close"])))
-    return bars
+        t = datetime.strptime(v["datetime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        out.append((t, float(v["close"])))
+    return out
 
+
+def src_yahoo(symbol, tf):
+    # Yahoo has no 4h candles, so 4h is built from 1h candles (UTC 00/04/08/12/16/20).
+    iv, rng = ("15m", "30d") if tf == "15m" else ("60m", "180d")
+    q = urllib.parse.urlencode({"interval": iv, "range": rng})
+    res = http_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?{q}")
+    r = res["chart"]["result"][0]
+    bars = [(utc(t), c) for t, c in zip(r["timestamp"], r["indicators"]["quote"][0]["close"]) if c is not None]
+    if tf != "4h":
+        return bars
+    groups = {}
+    for t, c in bars:
+        start = t.replace(minute=0, second=0, microsecond=0, hour=t.hour - t.hour % 4)
+        groups[start] = c  # last close in the 4h block
+    return sorted(groups.items())
+
+
+SOURCES = {"gate": src_gate, "mexc": src_mexc, "twelvedata": src_twelvedata, "yahoo": src_yahoo}
+
+
+def fetch_closed(market, tf, now):
+    src = market["source"]
+    try:
+        bars = SOURCES[src](market["symbol"], tf)
+    except Exception:
+        if src != "gate":
+            raise
+        bars = src_mexc(market["symbol"], tf)  # same symbol format on MEXC
+    step = timedelta(minutes=TF_MIN[tf])
+    mult = market.get("multiplier", 1)
+    closed = [(t, c * mult) for t, c in bars if t + step <= now]
+    if len(closed) < 60:
+        raise RuntimeError(f"only {len(closed)} candles returned")
+    return closed
+
+
+# ---- signal
 
 def ema(values, length):
     """Same as Pine's ta.ema: seeded with the SMA of the first `length` values."""
@@ -85,52 +145,85 @@ def find_crosses(bars, fast_len, slow_len):
             crosses.append((i, 1))
         elif fast[i] < slow[i] and fast[i - 1] >= slow[i - 1]:
             crosses.append((i, -1))
-    return crosses, fast, slow
+    return crosses
+
+
+def fmt(price):
+    """Enough decimals for both BTC (73561.07) and PEPE (0.0044782)."""
+    if price <= 0:
+        return str(price)
+    return f"{price:.{max(2, 4 - math.floor(math.log10(price)))}f}"
+
+
+def tp_level(market, price, d):
+    if market.get("tp_pips"):
+        return price + d * market["tp_pips"] * market.get("pip_size", 0.1)
+    if market.get("tp_pct"):
+        return price * (1 + d * market["tp_pct"] / 100)
+    return None
 
 
 def main():
-    symbol = env("SYMBOL", "XAU/USD")
-    interval = env("INTERVAL", "15min")
     fast_len, slow_len = int(env("FAST_LEN", 9)), int(env("SLOW_LEN", 20))
-    tp_pips, pip_size = float(env("TP_PIPS", 100)), float(env("PIP_SIZE", 0.1))
     state_file = env("STATE_FILE", "bot/state.json")
+    with open(env("MARKETS_FILE", "bot/markets.json")) as f:
+        cfg = json.load(f)
+    tfs = [tf for tf in cfg.get("timeframes", ["15m"]) if tf in TF_MIN]
 
     if "--test" in sys.argv:
-        send_telegram(f"TEST: EMA {fast_len}/{slow_len} bot is connected ({symbol}, {interval}).")
+        names = ", ".join(m["name"] for m in cfg["markets"])
+        send_telegram(f"TEST: EMA {fast_len}/{slow_len} bot is connected.\n"
+                      f"Timeframes: {', '.join(TF_LABEL[t] for t in tfs)}\nMarkets: {names}")
         print("Test message sent.")
         return
 
-    now = datetime.now(timezone.utc)
-    bars = fetch_closed_bars(symbol, interval, now)
-    crosses, fast, slow = find_crosses(bars, fast_len, slow_len)
-    last_t = bars[-1][0]
-
     try:
         with open(state_file) as f:
-            seen = datetime.fromisoformat(json.load(f)["last_bar"])
-    except (OSError, ValueError, KeyError):
-        seen = None  # first run: remember where we are, don't replay old crosses
+            state = json.load(f)
+        if not isinstance(state.get("markets"), dict):
+            state = {"markets": {}}
+    except (OSError, ValueError):
+        state = {"markets": {}}
 
-    step = timedelta(minutes=INTERVAL_MIN[interval])
-    if seen is not None:
-        for i, d in crosses:
-            t, price = bars[i]
-            if t <= seen:
+    now = datetime.now(timezone.utc)
+    for m in cfg["markets"]:
+        for tf in tfs:
+            key = f"{m['name']}|{tf}"
+            st = state["markets"].setdefault(key, {})
+            step = timedelta(minutes=TF_MIN[tf])
+            seen = datetime.fromisoformat(st["last_bar"]) if st.get("last_bar") else None
+            if seen is not None and now < seen + 2 * step:
+                continue  # no new candle has closed since the last check
+            try:
+                bars = fetch_closed(m, tf, now)
+            except Exception as e:  # one bad market must not stop the others
+                print(f"{key}: ERROR {e}")
+                if not st.get("error"):
+                    send_telegram(f"Bot can't read {m['name']} {TF_LABEL[tf]} prices: {e}")
+                st["error"] = True
                 continue
-            side = "BUY" if d == 1 else "SELL"
-            tp = f" | TP {price + d * tp_pips * pip_size:.2f}" if tp_pips > 0 else ""
-            local = (t + step).astimezone(timezone(timedelta(hours=7))).strftime("%d %b %H:%M")
-            late = " (late)" if t < last_t else ""
-            msg = (f"{side} {symbol} ~{price:.2f}{tp} (EMA {fast_len}/{slow_len} cross, {interval}, "
-                   f"candle closed {local} WIB){late}")
-            send_telegram(msg)
-            print("Sent:", msg)
+            if st.get("error"):
+                send_telegram(f"{m['name']} {TF_LABEL[tf]} prices are working again.")
+            st["error"] = False
+            if seen is not None:
+                for i, d in find_crosses(bars, fast_len, slow_len):
+                    t, price = bars[i]
+                    if t <= seen or t < bars[-1][0] - step:
+                        continue  # already sent, or too old to still be useful
+                    tp = tp_level(m, price, d)
+                    closed_at = (t + step).astimezone(WIB).strftime("%d %b %H:%M")
+                    late = " (late)" if t < bars[-1][0] else ""
+                    msg = (f"{'BUY' if d == 1 else 'SELL'} {m['name']} {TF_LABEL[tf]} ~{fmt(price)}"
+                           f"{' | TP ' + fmt(tp) if tp else ''}\n"
+                           f"EMA {fast_len}/{slow_len} cross, candle closed {closed_at} WIB{late}")
+                    send_telegram(msg)
+                    print("Sent:", msg.replace("\n", " | "))
+            st["last_bar"] = bars[-1][0].isoformat()
+            print(f"{key}: checked up to {st['last_bar']} close {fmt(bars[-1][1])}")
 
     os.makedirs(os.path.dirname(state_file) or ".", exist_ok=True)
     with open(state_file, "w") as f:
-        json.dump({"last_bar": last_t.isoformat()}, f)
-    print(f"Checked up to {last_t.isoformat()} | close {bars[-1][1]} | "
-          f"EMA{fast_len} {fast[-1]:.2f} EMA{slow_len} {slow[-1]:.2f}")
+        json.dump(state, f, indent=1)
 
 
 if __name__ == "__main__":
