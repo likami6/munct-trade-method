@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 TF_MIN = {"15m": 15, "1h": 60, "4h": 240}
 TF_LABEL = {"15m": "15m", "1h": "1H", "4h": "4H"}
 WIB = timezone(timedelta(hours=7))
+RETRY_GAP = timedelta(minutes=10)  # min time between fetches of one market/timeframe
 UA = "Mozilla/5.0 (X11; Linux x86_64) ema-cross-bot"
 
 
@@ -194,6 +195,10 @@ def main():
             seen = datetime.fromisoformat(st["last_bar"]) if st.get("last_bar") else None
             if seen is not None and now < seen + 2 * step:
                 continue  # no new candle has closed since the last check
+            last_fetch = datetime.fromisoformat(st["last_fetch"]) if st.get("last_fetch") else None
+            if last_fetch is not None and now < last_fetch + RETRY_GAP:
+                continue  # market closed (weekend, daily break) or data late: don't ask again yet
+            st["last_fetch"] = now.isoformat()
             try:
                 bars = fetch_closed(m, tf, now)
             except Exception as e:  # one bad market must not stop the others
