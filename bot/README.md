@@ -38,8 +38,9 @@ After that it runs by itself. The first run only remembers where it is, and ever
 
 ## Notes
 
-- Each market and timeframe is only fetched after a new candle has closed. Twelve Data (gold only)
-  uses about 130 of its 800 free requests a day.
+- Each market and timeframe is only fetched after a new candle has closed, and at most once every
+  10 minutes while waiting (weekends, the daily break, late data). Twelve Data is only used for gold:
+  about 130 requests on a trading day, at most about 430 on a weekend, against 800 free a day.
 - If a market's prices can't be read (for example a coin isn't listed), you get one Telegram
   message about it, and another when it works again.
 - If the bot was down for a while, it only sends crosses from the last two candles, not old ones.
