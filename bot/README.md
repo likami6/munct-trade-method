@@ -4,7 +4,17 @@ A free bot that sends you a Telegram message when EMA 9 crosses EMA 20 on a clos
 the same signal as the Pine strategy in TradingView. It runs on GitHub Actions every 5 minutes,
 so you don't need a paid TradingView plan.
 
-Prices come from Twelve Data, not your TradingView broker, so levels can differ by a few cents.
+It watches the 15m, 1H and 4H charts of the markets in `bot/markets.json`:
+XAUUSD, NAS100, BTC, 1000PEPE, ZEC, HYPE, LIT, PENGU and FARTCOIN.
+
+| Market | Price source | Note |
+|---|---|---|
+| XAUUSD | Twelve Data (free key) | TP = 100 pips ($10) |
+| NAS100 | Yahoo Finance `NQ=F` | Nasdaq 100 futures; 4H built from 1H candles |
+| Crypto | Gate.io USDT perpetuals (MEXC if Gate fails) | TP = 1%; 1000PEPE = PEPE x 1000 |
+
+Prices come from these sources, not your TradingView broker, so levels can differ slightly,
+and NAS100 can be some points away from a broker's NAS100 CFD.
 GitHub can start a run a few minutes late, so a message can arrive a few minutes after the candle closes.
 
 ## Setup (about 10 minutes)
@@ -19,10 +29,8 @@ GitHub can start a run a few minutes late, so a message can arrive a few minutes
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
    - `TWELVEDATA_API_KEY`
-5. **Optional settings** (Variables tab on the same page):
-   - `INTERVAL`: `5min`, `15min` (default), `30min`, `1h`, `4h` or `1day`
-   - `SYMBOL`: default `XAU/USD`
-   - `TP_PIPS`: default `100` (0 = no TP in the message)
+5. **Optional:** to add or remove a market or timeframe, edit `bot/markets.json` on GitHub
+   (timeframes can be `15m`, `1h`, `4h`; crypto symbols use the `COIN_USDT` form).
 6. **Test it.** Go to Actions > "EMA 9/20 Telegram alerts" > Run workflow, tick
    "Send a test message", and run. You should get a TEST message in Telegram.
 
@@ -30,7 +38,10 @@ After that it runs by itself. The first run only remembers where it is, and ever
 
 ## Notes
 
-- Use `5min` or slower. With `1min`, GitHub's 5-minute schedule is too slow.
-- The free Twelve Data plan allows 800 requests a day; this uses about 290.
+- Each market and timeframe is only fetched after a new candle has closed. Twelve Data (gold only)
+  uses about 130 of its 800 free requests a day.
+- If a market's prices can't be read (for example a coin isn't listed), you get one Telegram
+  message about it, and another when it works again.
+- If the bot was down for a while, it only sends crosses from the last two candles, not old ones.
 - GitHub pauses scheduled runs if the repo has no activity for 60 days. It emails you first,
   and you can turn the workflow back on in the Actions tab.
