@@ -164,6 +164,24 @@ def tp_level(market, price, d):
     return None
 
 
+def tp_note(market, d):
+    if market.get("tp_pips"):
+        return f" ({market['tp_pips']:g} pips)"
+    if market.get("tp_pct"):
+        return f" ({'+' if d == 1 else '-'}{market['tp_pct']:g}%)"
+    return ""
+
+
+def format_alert(market, tf_label, d, price, tp, when):
+    lines = [f"{'🟢 BUY' if d == 1 else '🔴 SELL'} {market['name']} · {tf_label}",
+             "━━━━━━━━━━━━",
+             f"💰 Entry: {fmt(price)}"]
+    if tp:
+        lines.append(f"🎯 TP: {fmt(tp)}{tp_note(market, d)}")
+    lines.append(f"🕖 {when}")
+    return "\n".join(lines)
+
+
 def main():
     fast_len, slow_len = int(env("FAST_LEN", 9)), int(env("SLOW_LEN", 20))
     state_file = env("STATE_FILE", "bot/state.json")
@@ -218,9 +236,7 @@ def main():
                     tp = tp_level(m, price, d)
                     closed_at = (t + step).astimezone(WIB).strftime("%d %b %H:%M")
                     late = " (late)" if t < bars[-1][0] else ""
-                    msg = (f"{'BUY' if d == 1 else 'SELL'} {m['name']} {TF_LABEL[tf]} ~{fmt(price)}"
-                           f"{' | TP ' + fmt(tp) if tp else ''}\n"
-                           f"EMA {fast_len}/{slow_len} cross, candle closed {closed_at} WIB{late}")
+                    msg = format_alert(m, TF_LABEL[tf], d, price, tp, closed_at + " WIB" + late)
                     send_telegram(msg)
                     print("Sent:", msg.replace("\n", " | "))
             st["last_bar"] = bars[-1][0].isoformat()
